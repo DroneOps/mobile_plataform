@@ -10,11 +10,13 @@ El nombre del dispositivo es CarroESP32.
 Solo se conecta un dispositivo a la vez. Si alguien del equipo tiene el carro
 conectado, nadie más puede entrar hasta que cierre su sesión.
 
-Necesitaras desgargar la aplicacion **PuTTY** para mandar instrucciones de manera inalambrica
+Necesitas una terminal serie para mandar las teclas de forma inalámbrica:
+**PuTTY** en Windows, **picocom** (o PuTTY) en Linux.
+
 ---
 
 
-## Conexion con Laptop con Windows (la unica que probe desconosco funcionamiento con linux)
+## Conexión desde Windows
 
 1. `Configuración → Bluetooth y dispositivos` y empareja con **CarroESP32**.
 2. Entra en `Más opciones de Bluetooth → Puertos COM`. Verás **dos** puertos:
@@ -29,15 +31,113 @@ PuTTY manda cada tecla al instante, sin necesidad de pulsar Enter.
 
 ---
 
+## Conexión desde Linux
+
+El carro usa Bluetooth Classic (SPP). En Linux se hace lo mismo que en Windows:
+emparejar, crear un puerto serie sobre Bluetooth (`/dev/rfcomm0` en lugar de un
+`COM`) y abrir una terminal serie a `115200`.
+
+### 1. Instalar la terminal serie (una sola vez)
+
+```bash
+sudo apt install picocom
+```
+
+Tu usuario tiene que estar en el grupo `dialout` (`groups` para comprobarlo,
+`sudo usermod -aG dialout $USER` y volver a iniciar sesión si no está).
+
+### 2. Emparejar el carro (una sola vez)
+
+Enciende el carro (LED azul parpadeando) y abre `bluetoothctl`:
+
+```bash
+bluetoothctl
+```
+
+Dentro:
+
+```
+power on
+agent on
+default-agent
+scan on
+```
+
+Espera a la línea `[NEW] Device XX:XX:XX:XX:XX:XX CarroESP32`, anota la MAC y:
+
+```
+scan off
+pair XX:XX:XX:XX:XX:XX
+trust XX:XX:XX:XX:XX:XX
+quit
+```
+
+### 3. Crear el puerto serie (cada vez que lo uses)
+
+```bash
+sudo rfcomm bind 0 XX:XX:XX:XX:XX:XX
+```
+
+Esto crea `/dev/rfcomm0`, el equivalente al COM *Saliente* de Windows.
+
+### 4. Abrir la terminal
+
+```bash
+picocom -b 115200 /dev/rfcomm0
+```
+
+Igual que PuTTY: cada tecla se envía al instante, sin Enter. Para salir:
+`Ctrl+A` y luego `Ctrl+X`. Al cerrar la conexión el carro se detiene solo.
+
+Cuando termines, libera el puerto:
+
+```bash
+sudo rfcomm release 0
+```
+
+> **Tampoco uses el Monitor Serie del IDE de Arduino con `/dev/rfcomm0`**, por
+> la misma razón que en Windows.
+
+| Problema en Linux | Qué hacer |
+|---|---|
+| `pair` falla o se queda colgado | Emparejamiento corrupto: `remove XX:XX...` en `bluetoothctl`, reinicia la ESP32 con **EN** y empareja de nuevo |
+| `rfcomm bind`: "Address already in use" | `sudo rfcomm release 0` y vuelve a hacer el `bind` |
+| `picocom`: "Permission denied" | Falta el grupo `dialout` (ver paso 1) |
+| `picocom` abre pero no aparece nada | Normal si el carro está detenido: no hay telemetría. Manda `t` para ver la configuración |
+
+---
+
+
+## Arrancar y que vaya derecho
+
+El carro lleva un giroscopio (IMU) y un PID que reparte potencia entre las
+ruedas para mantener el rumbo en las rectas. **El PID arranca apagado** y se
+pierde al reiniciar, así que cada vez que enciendas el carro:
+
+1. Conéctate y deja el carro **quieto sobre una superficie plana** un par de
+   segundos: al arrancar calibra el giroscopio.
+2. Manda `0` → debe responder `PID activado`.
+3. Manda `i` → debe responder `Sentido de correccion: INVERTIDO`.
+   Con el cableado actual el PID corrige hacia el lado equivocado si no se
+   invierte: en vez de enderezar el carro, lo desvía más.
+4. Manda `w` y comprueba que va recto. Si se desvía **cada vez más**, el sentido
+   está al revés: manda `i` otra vez.
+
+Si el carro se desvía siempre hacia el mismo lado aunque el PID esté bien, un
+motor rinde menos que el otro. Mira [Ajustar los motores](#ajustar-los-motores).
+
+---
 
 ## Controles
 
+### Movimiento
+
 | Tecla | Acción |
 |---|---|
-| `w` | Adelante |
+| `w` | Adelante (fija el rumbo actual como objetivo) |
 | `s` | Atrás |
-| `a` | Izquierda |
-| `d` | Derecha |
+| `a` | Giro a la izquierda sobre el eje |
+| `d` | Giro a la derecha sobre el eje |
 | `f` | **Parar** |
 
 > ### Importante para quien haga pruebas
@@ -48,6 +148,82 @@ PuTTY manda cada tecla al instante, sin necesidad de pulsar Enter.
 El carro **sí se detiene solo** si se pierde la conexión Bluetooth (te alejas,
 se cierra la app, se apaga el teléfono). Eso está cubierto por el firmware.
 
+### PID y giroscopio
+
+| Tecla | Acción |
+|---|---|
+| `0` | Activar / desactivar el PID |
+| `i` | Invertir el sentido de la corrección del PID |
+| `r` | Recalibrar el giroscopio (para el carro; déjalo quieto mientras lo hace) |
+| `1` / `2` | Kp −0.5 / +0.5 |
+| `3` / `4` | Ki −0.1 / +0.1 |
+| `5` / `6` | Kd −0.2 / +0.2 |
+| `t` | Ver la configuración actual |
+
+Para ajustar el PID empieza solo con Kp, luego Kd y Ki al final.
+
+### Velocidad
+
+| Tecla | Acción |
+|---|---|
+| `+` / `-` | Velocidad del modo actual ±10 PWM: en recta ajusta la base, girando ajusta la de giro |
+| `v` / `c` | Velocidad de giro +10 / −10 PWM (siempre) |
+
+### Pruebas y ajuste de motores
+
+| Tecla | Acción |
+|---|---|
+| `p` | Prueba automática de potencia: compara los dos motores (carro **en el suelo**) |
+| `m` / `n` | Mover **solo** el motor A / el motor B hacia adelante |
+| `g` / `h` | Mover **solo** el motor A / el motor B hacia atrás |
+| `j` / `k` | Invertir el sentido del motor A / del motor B (sin tocar cables) |
+| `7` / `8` | Compensación del motor A −5 / +5 PWM |
+| `9` / `o` | Compensación del motor B −5 / +5 PWM |
+
+Motor **A** = izquierdo, motor **B** = derecho. Todo lo que cambies con estas
+teclas se pierde al reiniciar; cuando encuentres el valor bueno, escríbelo en
+el `.ino` (`invertirA`, `invertirB`, `compensacionA`, `compensacionB`,
+`velocidadBase`, `velocidadGiro`, `Kp`, `Ki`, `Kd`) y vuelve a subirlo por USB.
+
+### Telemetría
+
+Mientras el carro se mueve imprime cada 200 ms:
+
+```
+rumbo=+0.3  giro=-0.1  corr=+0  pwmA=200  pwmB=200
+```
+
+- `rumbo`: grados acumulados desde que empezó la recta (objetivo 0).
+- `giro`: velocidad angular actual en grados/s.
+- `corr`: cuánto PWM está moviendo el PID de una rueda a la otra.
+- `pwmA` / `pwmB`: PWM que realmente se escribió en cada motor. Si son distintos
+  es el código (PID o compensación); si son iguales y aun así un motor rinde
+  menos, es hardware.
+
+---
+
+## Ajustar los motores
+
+Si con el PID apagado el carro se va siempre hacia el mismo lado, un motor es
+más flojo que el otro.
+
+1. **Confirmar que les llega lo mismo.** Con el carro dado vuelta y las llantas
+   en el aire, mide con el multímetro el voltaje en los cables de cada motor
+   mandando `m` (solo A) y luego `n` (solo B). Antes comprueba con `t` que
+   `compA=0 compB=0`. Si el voltaje es distinto, el problema está antes del
+   motor: canal del L293D, soldadura o cable.
+2. **Comparar rendimiento.** Si el voltaje es igual, manda `p` con el carro en
+   el suelo. Mide con el giroscopio cuánto empuja cada motor al mismo PWM y te
+   dice el porcentaje de diferencia y cuál es el flojo.
+3. **Corregir.**
+   - Diferencia < 10 %: normal, el PID lo compensa.
+   - 10–25 %: súmale compensación al motor flojo (`8` para A, `o` para B) de 5
+     en 5 hasta que las dos llantas giren parecido, y guarda el valor en el
+     `.ino`.
+   - > 25 %: con el carro apagado gira cada llanta con la mano. Si una roza o
+     hace ruido, revisa la caja de engranes; si giran igual, cambia el motor.
+
+---
 
 ## Encender el carro
 
